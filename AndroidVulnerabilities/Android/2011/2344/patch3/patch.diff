@@ -1,0 +1,13 @@
+diff --git a/src/com/cooliris/picasa/PicasaContentProvider.java b/src/com/cooliris/picasa/PicasaContentProvider.java
+index 870c7f1..4211fcf 100644
+--- a/src/com/cooliris/picasa/PicasaContentProvider.java
++++ b/src/com/cooliris/picasa/PicasaContentProvider.java
+@@ -516,7 +516,7 @@
+
+         // A connection to the Picasa API for a specific user account. Initially
+         // null.
+-        public PicasaApi api = new PicasaApi();
++        public PicasaApi api = new PicasaApi(getContext().getContentResolver());
+
+         // A handle to the Picasa databse.
+         public SQLiteDatabase db;

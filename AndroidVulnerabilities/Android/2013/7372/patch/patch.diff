@@ -1,0 +1,16 @@
+diff --git a/luni/src/main/java/org/apache/harmony/security/provider/crypto/SHA1PRNG_SecureRandomImpl.java b/luni/src/main/java/org/apache/harmony/security/provider/crypto/SHA1PRNG_SecureRandomImpl.java
+index 5760906..5c0e328 100644
+--- a/luni/src/main/java/org/apache/harmony/security/provider/crypto/SHA1PRNG_SecureRandomImpl.java
++++ b/luni/src/main/java/org/apache/harmony/security/provider/crypto/SHA1PRNG_SecureRandomImpl.java
+@@ -300,6 +300,11 @@
+             updateSeed(getRandomBytes(DIGEST_LENGTH));
+             nextBIndex = HASHBYTES_TO_USE;
+
++            // updateSeed(...) updates where the last word of the seed is, so we
++            // have to read it again.
++            lastWord = seed[BYTES_OFFSET] == 0 ? 0
++                    : (seed[BYTES_OFFSET] + extrabytes) >> 3 - 1;
++
+         } else if (state == SET_SEED) {
+
+             System.arraycopy(seed, HASH_OFFSET, copies, HASHCOPY_OFFSET,

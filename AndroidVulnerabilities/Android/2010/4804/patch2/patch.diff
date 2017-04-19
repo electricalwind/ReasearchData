@@ -1,0 +1,12 @@
+Index: src/com/android/browser/BrowserSettings.java
+===================================================================
+
+ @@ -229,6 +229,8 @@ public void update(Observable o, Object arg) {
+             s.setNeedInitialFocus(false);
+             // Browser supports multiple windows
+             s.setSupportMultipleWindows(true);
++            // disable content url access
++            s.setAllowContentAccess(false);
+
+             // HTML5 API flags
+             s.setAppCacheEnabled(b.appCacheEnabled);

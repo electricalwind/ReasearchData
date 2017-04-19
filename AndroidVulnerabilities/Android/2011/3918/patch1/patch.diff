@@ -1,0 +1,8 @@
+417	417
+418	418		service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+419	419		    class main
+420		-	    socket zygote stream 666
+420	    +	    socket zygote stream 660 root system
+421	421		    onrestart write /sys/android_power/request_state wake
+422	422		    onrestart write /sys/power/state on
+423	423		    onrestart restart media

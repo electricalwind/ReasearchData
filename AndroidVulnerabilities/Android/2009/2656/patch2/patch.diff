@@ -1,0 +1,14 @@
+telephony/java/com/android/internal/telephony/gsm/SMSDispatcher.java
+
+ @@ -254,7 +254,11 @@ public void handleMessage(Message msg) {
+             }
+
+             sms = (SmsMessage) ar.result;
+-            dispatchMessage(sms);
++            try {
++                dispatchMessage(sms);
++            } catch (RuntimeException ex) {
++                Log.e(TAG, "Exception processing incoming SMS. Exception:" + ex);
++            }
+
+             break;

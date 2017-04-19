@@ -1,0 +1,74 @@
+diff --git a/src/com/android/settings/ChooseLockGeneric.java b/src/com/android/settings/ChooseLockGeneric.java
+index 017adfa..49de366 100644
+--- a/src/com/android/settings/ChooseLockGeneric.java
++++ b/src/com/android/settings/ChooseLockGeneric.java
+@@ -60,6 +60,9 @@
+         return false;
+     }
+
++    public static class InternalActivity extends ChooseLockGeneric {
++    }
++
+     public static class ChooseLockGenericFragment extends SettingsPreferenceFragment {
+         private static final int MIN_PASSWORD_LENGTH = 4;
+         private static final String KEY_UNLOCK_BACKUP_INFO = "unlock_backup_info";
+@@ -97,7 +100,9 @@
+             // Defaults to needing to confirm credentials
+             final boolean confirmCredentials = getActivity().getIntent()
+                 .getBooleanExtra(CONFIRM_CREDENTIALS, true);
+-            mPasswordConfirmed = !confirmCredentials;
++            if (getActivity() instanceof ChooseLockGeneric.InternalActivity) {
++                mPasswordConfirmed = !confirmCredentials;
++            }
+
+             if (savedInstanceState != null) {
+                 mPasswordConfirmed = savedInstanceState.getBoolean(PASSWORD_CONFIRMED);
+@@ -341,7 +346,8 @@
+         }
+
+         private Intent getBiometricSensorIntent() {
+-            Intent fallBackIntent = new Intent().setClass(getActivity(), ChooseLockGeneric.class);
++            Intent fallBackIntent = new Intent().setClass(getActivity(),
++                    ChooseLockGeneric.InternalActivity.class);
+             fallBackIntent.putExtra(LockPatternUtils.LOCKSCREEN_BIOMETRIC_WEAK_FALLBACK, true);
+             fallBackIntent.putExtra(CONFIRM_CREDENTIALS, false);
+             fallBackIntent.putExtra(EXTRA_SHOW_FRAGMENT_TITLE,
+
+
+diff --git a/src/com/android/settings/ChooseLockPassword.java b/src/com/android/settings/ChooseLockPassword.java
+index c6f5212..f43738f 100644
+--- a/src/com/android/settings/ChooseLockPassword.java
++++ b/src/com/android/settings/ChooseLockPassword.java
+@@ -161,6 +161,9 @@
+             super.onCreate(savedInstanceState);
+             mLockPatternUtils = new LockPatternUtils(getActivity());
+             Intent intent = getActivity().getIntent();
++            if (!(getActivity() instanceof ChooseLockPassword)) {
++                throw new SecurityException("Fragment contained in wrong activity");
++            }
+             mRequestedQuality = Math.max(intent.getIntExtra(LockPatternUtils.PASSWORD_TYPE_KEY,
+                     mRequestedQuality), mLockPatternUtils.getRequestedPasswordQuality());
+             mPasswordMinLength = Math.max(
+diff --git a/src/com/android/settings/ChooseLockPattern.java b/src/com/android/settings/ChooseLockPattern.java
+index c3045e2..328312c 100644
+--- a/src/com/android/settings/ChooseLockPattern.java
++++ b/src/com/android/settings/ChooseLockPattern.java
+@@ -308,6 +308,9 @@
+         public void onCreate(Bundle savedInstanceState) {
+             super.onCreate(savedInstanceState);
+             mChooseLockSettingsHelper = new ChooseLockSettingsHelper(getActivity());
++            if (!(getActivity() instanceof ChooseLockPattern)) {
++                throw new SecurityException("Fragment contained in wrong activity");
++            }
+         }
+
+         @Override
+@@ -338,7 +341,7 @@
+             topLayout.setDefaultTouchRecepient(mLockPatternView);
+
+             final boolean confirmCredentials = getActivity().getIntent()
+-                    .getBooleanExtra("confirm_credentials", false);
++                    .getBooleanExtra("confirm_credentials", true);
+
+             if (savedInstanceState == null) {
+                 if (confirmCredentials) {

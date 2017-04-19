@@ -1,0 +1,904 @@
+This sends the intents to the Settings app to show
+the dialogs for the incoming connection requests.
+
+Change-Id: Ibe267f7cda28ce2a46c25800df2e8ac685b0b9e6
+---
+ core/java/android/bluetooth/BluetoothA2dp.java     |   16 ++
+ core/java/android/bluetooth/BluetoothDevice.java   |   27 +++
+ .../bluetooth/BluetoothDeviceProfileState.java     |  246 +++++++++++++++++++-
+ core/java/android/bluetooth/BluetoothHeadset.java  |   17 ++
+ core/java/android/bluetooth/IBluetoothA2dp.aidl    |    2 +
+ core/java/android/bluetooth/IBluetoothHeadset.aidl |    1 +
+ core/java/android/server/BluetoothA2dpService.java |   16 ++
+ core/java/android/server/BluetoothEventLoop.java   |   20 ++-
+ core/java/android/server/BluetoothService.java     |  133 ++++++++++-
+ core/jni/android_server_BluetoothEventLoop.cpp     |   28 +--
+ core/jni/android_server_BluetoothService.cpp       |   30 +++
+ 11 files changed, 493 insertions(+), 43 deletions(-)
+
+diff --git a/core/java/android/bluetooth/BluetoothA2dp.java b/core/java/android/bluetooth/BluetoothA2dp.java
+index 7e5f858..8218c03 100644
+--- a/core/java/android/bluetooth/BluetoothA2dp.java
++++ b/core/java/android/bluetooth/BluetoothA2dp.java
+@@ -269,6 +269,22 @@ public final class BluetoothA2dp {
+         }
+     }
+
++    /**
++     * Allow or disallow incoming connection
++     * @param device Sink
++     * @param value True / False
++     * @return Success or Failure of the binder call.
++     */
++    public boolean allowIncomingConnect(BluetoothDevice device, boolean value) {
++        if (DBG) log("allowIncomingConnect(" + device + ":" + value + ")");
++        try {
++            return mService.allowIncomingConnect(device, value);
++        } catch (RemoteException e) {
++            Log.e(TAG, "", e);
++            return false;
++        }
++    }
++
+     /** Helper for converting a state to a string.
+      * For debug use only - strings are not internationalized.
+      * @hide
+diff --git a/core/java/android/bluetooth/BluetoothDevice.java b/core/java/android/bluetooth/BluetoothDevice.java
+index aee6ad8..e67ace0 100644
+--- a/core/java/android/bluetooth/BluetoothDevice.java
++++ b/core/java/android/bluetooth/BluetoothDevice.java
+@@ -276,6 +276,33 @@ public final class BluetoothDevice implements Parcelable {
+     public static final String ACTION_PAIRING_CANCEL =
+             "android.bluetooth.device.action.PAIRING_CANCEL";
+
++    /** @hide */
++    @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
++    public static final String ACTION_CONNECTION_ACCESS_REQUEST =
++            "android.bluetooth.device.action.CONNECTION_ACCESS_REQUEST";
++
++    /** @hide */
++    @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
++    public static final String ACTION_CONNECTION_ACCESS_REPLY =
++            "android.bluetooth.device.action.CONNECTION_ACCESS_REPLY";
++
++    /** @hide */
++    @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
++    public static final String ACTION_CONNECTION_ACCESS_CANCEL =
++            "android.bluetooth.device.action.CONNECTION_ACCESS_CANCEL";
++    /**
++     * Used as an extra field in {@link #ACTION_CONNECTION_ACCESS_REPLY} intent.
++     * @hide
++     */
++    public static final String EXTRA_CONNECTION_ACCESS_RESULT =
++        "android.bluetooth.device.extra.CONNECTION_ACCESS_RESULT";
++
++    /**@hide*/
++    public static final int CONNECTION_ACCESS_YES = 1;
++
++    /**@hide*/
++    public static final int CONNECTION_ACCESS_NO = 2;
++
+     /** A bond attempt succeeded
+      * @hide */
+     public static final int BOND_SUCCESS = 0;
+diff --git a/core/java/android/bluetooth/BluetoothDeviceProfileState.java b/core/java/android/bluetooth/BluetoothDeviceProfileState.java
+index f6d7073..5f56476 100644
+--- a/core/java/android/bluetooth/BluetoothDeviceProfileState.java
++++ b/core/java/android/bluetooth/BluetoothDeviceProfileState.java
+@@ -21,9 +21,11 @@ import android.content.Context;
+ import android.content.Intent;
+ import android.content.IntentFilter;
+ import android.os.Message;
++import android.os.PowerManager;
+ import android.server.BluetoothA2dpService;
+ import android.server.BluetoothService;
+ import android.util.Log;
++import android.util.Pair;
+
+ import com.android.internal.util.HierarchicalState;
+ import com.android.internal.util.HierarchicalStateMachine;
+@@ -73,9 +75,17 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+     public static final int AUTO_CONNECT_PROFILES = 101;
+     public static final int TRANSITION_TO_STABLE = 102;
+     public static final int CONNECT_OTHER_PROFILES = 103;
++    private static final int CONNECTION_ACCESS_REQUEST_REPLY = 104;
++    private static final int CONNECTION_ACCESS_REQUEST_EXPIRY = 105;
+
+     private static final int AUTO_CONNECT_DELAY = 6000; // 6 secs
+     private static final int CONNECT_OTHER_PROFILES_DELAY = 4000; // 4 secs
++    private static final int CONNECTION_ACCESS_REQUEST_EXPIRY_TIMEOUT = 7000; // 7 secs
++    private static final int CONNECTION_ACCESS_UNDEFINED = -1;
++    private static final long INIT_INCOMING_REJECT_TIMER = 1000; // 1 sec
++    private static final long MAX_INCOMING_REJECT_TIMER = 3600 * 1000 * 4; // 4 hours
++
++    private static final String PREFS_NAME = "ConnectionAccess";
+
+     private BondedDevice mBondedDevice = new BondedDevice();
+     private OutgoingHandsfree mOutgoingHandsfree = new OutgoingHandsfree();
+@@ -90,10 +100,16 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+     private BluetoothPbap     mPbapService;
+     private boolean mHeadsetServiceConnected;
+     private boolean mPbapServiceConnected;
++    private static final String BLUETOOTH_ADMIN_PERM = android.Manifest.permission.BLUETOOTH_ADMIN;
+
+     private BluetoothDevice mDevice;
+     private int mHeadsetState;
+     private int mA2dpState;
++    private long mIncomingRejectTimer;
++    private boolean mConnectionAccessReplyReceived = false;
++    private Pair<Integer, String> mIncomingConnections;
++    private PowerManager.WakeLock mWakeLock;
++    private PowerManager mPowerManager;
+
+     private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+         @Override
+@@ -108,6 +124,10 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                 int initiator = intent.getIntExtra(
+                     BluetoothHeadset.EXTRA_DISCONNECT_INITIATOR,
+                     BluetoothHeadset.LOCAL_DISCONNECT);
++                // We trust this device now
++                if (newState == BluetoothHeadset.STATE_CONNECTED) {
++                    setTrust(BluetoothDevice.CONNECTION_ACCESS_YES);
++                }
+                 mHeadsetState = newState;
+                 if (newState == BluetoothHeadset.STATE_DISCONNECTED &&
+                     initiator == BluetoothHeadset.REMOTE_DISCONNECT) {
+@@ -121,6 +141,10 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                 int newState = intent.getIntExtra(BluetoothA2dp.EXTRA_SINK_STATE, 0);
+                 int oldState = intent.getIntExtra(BluetoothA2dp.EXTRA_PREVIOUS_SINK_STATE, 0);
+                 mA2dpState = newState;
++                // We trust this device now
++                if (newState == BluetoothA2dp.STATE_CONNECTED) {
++                    setTrust(BluetoothDevice.CONNECTION_ACCESS_YES);
++                }
+                 if ((oldState == BluetoothA2dp.STATE_CONNECTED ||
+                            oldState == BluetoothA2dp.STATE_PLAYING) &&
+                            newState == BluetoothA2dp.STATE_DISCONNECTED) {
+@@ -134,6 +158,13 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                 // This is technically not needed, but we can get stuck sometimes.
+                 // For example, if incoming A2DP fails, we are not informed by Bluez
+                 sendMessage(TRANSITION_TO_STABLE);
++            } else if (action.equals(BluetoothDevice.ACTION_CONNECTION_ACCESS_REPLY)) {
++                mWakeLock.release();
++                int val = intent.getIntExtra(BluetoothDevice.EXTRA_CONNECTION_ACCESS_RESULT,
++                                             BluetoothDevice.CONNECTION_ACCESS_NO);
++                Message msg = obtainMessage(CONNECTION_ACCESS_REQUEST_REPLY);
++                msg.arg1 = val;
++                sendMessage(msg);
+             }
+       }
+     };
+@@ -174,11 +205,20 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+         filter.addAction(BluetoothHeadset.ACTION_STATE_CHANGED);
+         filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+         filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
++        filter.addAction(BluetoothDevice.ACTION_CONNECTION_ACCESS_REPLY);
+
+         mContext.registerReceiver(mBroadcastReceiver, filter);
+
+         HeadsetServiceListener l = new HeadsetServiceListener();
+         PbapServiceListener p = new PbapServiceListener();
++
++        mIncomingConnections = mService.getIncomingState(address);
++        mIncomingRejectTimer = readTimerValue();
++        mPowerManager = (PowerManager)mContext.getSystemService(Context.POWER_SERVICE);
++        mWakeLock = mPowerManager.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK |
++                                              PowerManager.ACQUIRE_CAUSES_WAKEUP |
++                                              PowerManager.ON_AFTER_RELEASE, TAG);
++        mWakeLock.setReferenceCounted(false);
+     }
+
+     private class HeadsetServiceListener implements BluetoothHeadset.ServiceListener {
+@@ -438,6 +478,24 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                     // Ignore
+                     Log.e(TAG, "Error: Incoming connection with a pending incoming connection");
+                     break;
++                case CONNECTION_ACCESS_REQUEST_REPLY:
++                    int val = message.arg1;
++                    mConnectionAccessReplyReceived = true;
++                    boolean value = false;
++                    if (val == BluetoothDevice.CONNECTION_ACCESS_YES) {
++                        value = true;
++                    }
++                    setTrust(val);
++
++                    handleIncomingConnection(CONNECT_HFP_INCOMING, value);
++                    break;
++                case CONNECTION_ACCESS_REQUEST_EXPIRY:
++                    if (!mConnectionAccessReplyReceived) {
++                        handleIncomingConnection(CONNECT_HFP_INCOMING, false);
++                        sendConnectionAccessRemovalIntent();
++                        sendMessage(TRANSITION_TO_STABLE);
++                    }
++                    break;
+                 case CONNECT_A2DP_INCOMING:
+                     // Serialize the commands.
+                     deferMessage(message);
+@@ -608,6 +666,25 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                 case CONNECT_A2DP_INCOMING:
+                     // ignore
+                     break;
++                case CONNECTION_ACCESS_REQUEST_REPLY:
++                    int val = message.arg1;
++                    mConnectionAccessReplyReceived = true;
++                    boolean value = false;
++                    if (val == BluetoothDevice.CONNECTION_ACCESS_YES) {
++                        value = true;
++                    }
++                    setTrust(val);
++                    handleIncomingConnection(CONNECT_A2DP_INCOMING, value);
++                    break;
++                case CONNECTION_ACCESS_REQUEST_EXPIRY:
++                    // The check protects the race condition between REQUEST_REPLY
++                    // and the timer expiry.
++                    if (!mConnectionAccessReplyReceived) {
++                        handleIncomingConnection(CONNECT_A2DP_INCOMING, false);
++                        sendConnectionAccessRemovalIntent();
++                        sendMessage(TRANSITION_TO_STABLE);
++                    }
++                    break;
+                 case CONNECT_A2DP_OUTGOING:
+                     // Defer message and retry
+                     deferMessage(message);
+@@ -663,8 +740,138 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+         deferMessage(msg);
+     }
+
++    private void updateIncomingAllowedTimer() {
++        // Not doing a perfect exponential backoff because
++        // we want two different rates. For all practical
++        // purposes, this is good enough.
++        if (mIncomingRejectTimer == 0) mIncomingRejectTimer = INIT_INCOMING_REJECT_TIMER;
++
++        mIncomingRejectTimer *= 5;
++        if (mIncomingRejectTimer > MAX_INCOMING_REJECT_TIMER) {
++            mIncomingRejectTimer = MAX_INCOMING_REJECT_TIMER;
++        }
++        writeTimerValue(mIncomingRejectTimer);
++    }
++
++    private boolean handleIncomingConnection(int command, boolean accept) {
++        boolean ret = false;
++        Log.i(TAG, "handleIncomingConnection:" + command + ":" + accept);
++        switch (command) {
++            case CONNECT_HFP_INCOMING:
++                if (!accept) {
++                    ret = mHeadsetService.rejectIncomingConnect(mDevice);
++                    sendMessage(TRANSITION_TO_STABLE);
++                    updateIncomingAllowedTimer();
++                } else if (mHeadsetState == BluetoothHeadset.STATE_CONNECTING) {
++                    writeTimerValue(0);
++                    ret =  mHeadsetService.acceptIncomingConnect(mDevice);
++                } else if (mHeadsetState == BluetoothHeadset.STATE_DISCONNECTED) {
++                    writeTimerValue(0);
++                    handleConnectionOfOtherProfiles(command);
++                    ret = mHeadsetService.createIncomingConnect(mDevice);
++                }
++                break;
++            case CONNECT_A2DP_INCOMING:
++                if (!accept) {
++                    ret = mA2dpService.allowIncomingConnect(mDevice, false);
++                    sendMessage(TRANSITION_TO_STABLE);
++                    updateIncomingAllowedTimer();
++                } else {
++                    writeTimerValue(0);
++                    ret = mA2dpService.allowIncomingConnect(mDevice, true);
++                    handleConnectionOfOtherProfiles(command);
++                }
++                break;
++            default:
++                Log.e(TAG, "Waiting for incoming connection but state changed to:" + command);
++                break;
++       }
++       return ret;
++    }
++
++    private void sendConnectionAccessIntent() {
++        mConnectionAccessReplyReceived = false;
++
++        if (!mPowerManager.isScreenOn()) mWakeLock.acquire();
++
++        Intent intent = new Intent(BluetoothDevice.ACTION_CONNECTION_ACCESS_REQUEST);
++        intent.putExtra(BluetoothDevice.EXTRA_DEVICE, mDevice);
++        mContext.sendBroadcast(intent, BLUETOOTH_ADMIN_PERM);
++    }
++
++    private void sendConnectionAccessRemovalIntent() {
++        mWakeLock.release();
++        Intent intent = new Intent(BluetoothDevice.ACTION_CONNECTION_ACCESS_CANCEL);
++        intent.putExtra(BluetoothDevice.EXTRA_DEVICE, mDevice);
++        mContext.sendBroadcast(intent, BLUETOOTH_ADMIN_PERM);
++    }
++
++    private int getTrust() {
++        String address = mDevice.getAddress();
++        if (mIncomingConnections != null) return mIncomingConnections.first;
++        return CONNECTION_ACCESS_UNDEFINED;
++    }
++
++
++    private String getStringValue(long value) {
++        StringBuilder sbr = new StringBuilder();
++        sbr.append(Long.toString(System.currentTimeMillis()));
++        sbr.append("-");
++        sbr.append(Long.toString(value));
++        return sbr.toString();
++    }
++
++    private void setTrust(int value) {
++        String second;
++        if (mIncomingConnections == null) {
++            second = getStringValue(INIT_INCOMING_REJECT_TIMER);
++        } else {
++            second = mIncomingConnections.second;
++        }
++
++        mIncomingConnections = new Pair(value, second);
++        mService.writeIncomingConnectionState(mDevice.getAddress(), mIncomingConnections);
++    }
++
++    private void writeTimerValue(long value) {
++        Integer first;
++        if (mIncomingConnections == null) {
++            first = CONNECTION_ACCESS_UNDEFINED;
++        } else {
++            first = mIncomingConnections.first;
++        }
++        mIncomingConnections = new Pair(first, getStringValue(value));
++        mService.writeIncomingConnectionState(mDevice.getAddress(), mIncomingConnections);
++    }
++
++    private long readTimerValue() {
++        if (mIncomingConnections == null)
++            return 0;
++        String value = mIncomingConnections.second;
++        String[] splits = value.split("-");
++        if (splits != null && splits.length == 2) {
++            return Long.parseLong(splits[1]);
++        }
++        return 0;
++    }
++
++    private boolean readIncomingAllowedValue() {
++        if (readTimerValue() == 0) return true;
++        String value = mIncomingConnections.second;
++        String[] splits = value.split("-");
++        if (splits != null && splits.length == 2) {
++            long val1 = Long.parseLong(splits[0]);
++            long val2 = Long.parseLong(splits[1]);
++            if (val1 + val2 <= System.currentTimeMillis()) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     synchronized boolean processCommand(int command) {
+-        Log.i(TAG, "Processing command:" + command);
++        Log.e(TAG, "Processing command:" + command);
++        Message msg;
+         switch(command) {
+             case  CONNECT_HFP_OUTGOING:
+                 if (mHeadsetService != null) {
+@@ -674,11 +881,21 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+             case CONNECT_HFP_INCOMING:
+                 if (!mHeadsetServiceConnected) {
+                     deferProfileServiceMessage(command);
+-                } else if (mHeadsetState == BluetoothHeadset.STATE_CONNECTING) {
+-                    return mHeadsetService.acceptIncomingConnect(mDevice);
+-                } else if (mHeadsetState == BluetoothHeadset.STATE_DISCONNECTED) {
+-                    handleConnectionOfOtherProfiles(command);
+-                    return mHeadsetService.createIncomingConnect(mDevice);
++                } else {
++                    // Check if device is already trusted
++                    int access = getTrust();
++                    if (access == BluetoothDevice.CONNECTION_ACCESS_YES) {
++                        handleIncomingConnection(command, true);
++                    } else if (access == BluetoothDevice.CONNECTION_ACCESS_NO &&
++                               !readIncomingAllowedValue()) {
++                        handleIncomingConnection(command, false);
++                    } else {
++                        sendConnectionAccessIntent();
++                        msg = obtainMessage(CONNECTION_ACCESS_REQUEST_EXPIRY);
++                        sendMessageDelayed(msg,
++                                CONNECTION_ACCESS_REQUEST_EXPIRY_TIMEOUT);
++                    }
++                    return true;
+                 }
+                 break;
+             case CONNECT_A2DP_OUTGOING:
+@@ -687,8 +904,19 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                 }
+                 break;
+             case CONNECT_A2DP_INCOMING:
+-                handleConnectionOfOtherProfiles(command);
+-                // ignore, Bluez takes care
++                // Check if device is already trusted
++                int access = getTrust();
++                if (access == BluetoothDevice.CONNECTION_ACCESS_YES) {
++                    handleIncomingConnection(command, true);
++                } else if (access == BluetoothDevice.CONNECTION_ACCESS_NO &&
++                           !readIncomingAllowedValue()) {
++                    handleIncomingConnection(command, false);
++                } else {
++                    sendConnectionAccessIntent();
++                    msg = obtainMessage(CONNECTION_ACCESS_REQUEST_EXPIRY);
++                    sendMessageDelayed(msg,
++                            CONNECTION_ACCESS_REQUEST_EXPIRY_TIMEOUT);
++                }
+                 return true;
+             case DISCONNECT_HFP_OUTGOING:
+                 if (!mHeadsetServiceConnected) {
+@@ -729,6 +957,8 @@ public final class BluetoothDeviceProfileState extends HierarchicalStateMachine
+                 }
+                 break;
+             case UNPAIR:
++                writeTimerValue(INIT_INCOMING_REJECT_TIMER);
++                setTrust(CONNECTION_ACCESS_UNDEFINED);
+                 return mService.removeBondInternal(mDevice.getAddress());
+             default:
+                 Log.e(TAG, "Error: Unknown Command");
+diff --git a/core/java/android/bluetooth/BluetoothHeadset.java b/core/java/android/bluetooth/BluetoothHeadset.java
+index 197b022..61b5a0b 100644
+--- a/core/java/android/bluetooth/BluetoothHeadset.java
++++ b/core/java/android/bluetooth/BluetoothHeadset.java
+@@ -457,6 +457,23 @@ public final class BluetoothHeadset {
+     }
+
+     /**
++     * Reject the incoming connection.
++     * @hide
++     */
++    public boolean rejectIncomingConnect(BluetoothDevice device) {
++        if (DBG) log("rejectIncomingConnect");
++        if (mService != null) {
++            try {
++                return mService.rejectIncomingConnect(device);
++            } catch (RemoteException e) {Log.e(TAG, e.toString());}
++        } else {
++            Log.w(TAG, "Proxy not attached to service");
++            if (DBG) Log.d(TAG, Log.getStackTraceString(new Throwable()));
++        }
++        return false;
++    }
++
++    /**
+      * Connect to a Bluetooth Headset.
+      * Note: This is an internal function and shouldn't be exposed
+      * @hide
+diff --git a/core/java/android/bluetooth/IBluetoothA2dp.aidl b/core/java/android/bluetooth/IBluetoothA2dp.aidl
+index 40f1058..0c2cf1b 100644
+--- a/core/java/android/bluetooth/IBluetoothA2dp.aidl
++++ b/core/java/android/bluetooth/IBluetoothA2dp.aidl
+@@ -36,4 +36,6 @@ interface IBluetoothA2dp {
+
+     boolean connectSinkInternal(in BluetoothDevice device);
+     boolean disconnectSinkInternal(in BluetoothDevice device);
++    boolean allowIncomingConnect(in BluetoothDevice device, boolean value);
++
+ }
+diff --git a/core/java/android/bluetooth/IBluetoothHeadset.aidl b/core/java/android/bluetooth/IBluetoothHeadset.aidl
+index d96f0ca..62bceee 100644
+--- a/core/java/android/bluetooth/IBluetoothHeadset.aidl
++++ b/core/java/android/bluetooth/IBluetoothHeadset.aidl
+@@ -37,6 +37,7 @@ interface IBluetoothHeadset {
+
+     boolean createIncomingConnect(in BluetoothDevice device);
+     boolean acceptIncomingConnect(in BluetoothDevice device);
++    boolean rejectIncomingConnect(in BluetoothDevice device);
+     boolean cancelConnectThread();
+     boolean connectHeadsetInternal(in BluetoothDevice device);
+     boolean disconnectHeadsetInternal(in BluetoothDevice device);
+diff --git a/core/java/android/server/BluetoothA2dpService.java b/core/java/android/server/BluetoothA2dpService.java
+index 6e221c8..bea01f3 100644
+--- a/core/java/android/server/BluetoothA2dpService.java
++++ b/core/java/android/server/BluetoothA2dpService.java
+@@ -457,6 +457,22 @@ public class BluetoothA2dpService extends IBluetoothA2dp.Stub {
+                 Settings.Secure.getBluetoothA2dpSinkPriorityKey(device.getAddress()), priority);
+     }
+
++    public synchronized boolean allowIncomingConnect(BluetoothDevice device, boolean value) {
++        mContext.enforceCallingOrSelfPermission(BLUETOOTH_ADMIN_PERM,
++                                                "Need BLUETOOTH_ADMIN permission");
++        String address = device.getAddress();
++        if (!BluetoothAdapter.checkBluetoothAddress(address)) {
++            return false;
++        }
++        Integer data = mBluetoothService.getAuthorizationAgentRequestData(address);
++        if (data == null) {
++            Log.w(TAG, "allowIncomingConnect(" + device + ") called but no native data available");
++            return false;
++        }
++        log("allowIncomingConnect: A2DP: " + device + ":" + value);
++        return mBluetoothService.setAuthorizationNative(address, value, data.intValue());
++    }
++
+     private synchronized void onSinkPropertyChanged(String path, String []propValues) {
+         if (!mBluetoothService.isEnabled()) {
+             return;
+diff --git a/core/java/android/server/BluetoothEventLoop.java b/core/java/android/server/BluetoothEventLoop.java
+index c877c5c..af233a0 100644
+--- a/core/java/android/server/BluetoothEventLoop.java
++++ b/core/java/android/server/BluetoothEventLoop.java
+@@ -48,6 +48,7 @@ class BluetoothEventLoop {
+     private boolean mInterrupted;
+
+     private final HashMap<String, Integer> mPasskeyAgentRequestData;
++    private final HashMap<String, Integer> mAuthorizationAgentRequestData;
+     private final BluetoothService mBluetoothService;
+     private final BluetoothAdapter mAdapter;
+     private final Context mContext;
+@@ -104,6 +105,7 @@ class BluetoothEventLoop {
+         mBluetoothService = bluetoothService;
+         mContext = context;
+         mPasskeyAgentRequestData = new HashMap();
++        mAuthorizationAgentRequestData = new HashMap<String, Integer>();
+         mAdapter = adapter;
+         initializeNativeDataNative();
+     }
+@@ -120,6 +122,10 @@ class BluetoothEventLoop {
+         return mPasskeyAgentRequestData;
+     }
+
++    /* package */ HashMap<String, Integer> getAuthorizationAgentRequestData() {
++        return mAuthorizationAgentRequestData;
++    }
++
+     /* package */ void start() {
+
+         if (!isEventLoopRunningNative()) {
+@@ -491,27 +497,29 @@ class BluetoothEventLoop {
+         mContext.sendBroadcast(intent, BLUETOOTH_ADMIN_PERM);
+     }
+
+-    private boolean onAgentAuthorize(String objectPath, String deviceUuid) {
++    private void  onAgentAuthorize(String objectPath, String deviceUuid, int nativeData) {
+         String address = mBluetoothService.getAddressFromObjectPath(objectPath);
+         if (address == null) {
+             Log.e(TAG, "Unable to get device address in onAuthAgentAuthorize");
+-            return false;
++            return;
+         }
+
+         boolean authorized = false;
+         ParcelUuid uuid = ParcelUuid.fromString(deviceUuid);
+         BluetoothA2dp a2dp = new BluetoothA2dp(mContext);
+
++        BluetoothDevice device = mAdapter.getRemoteDevice(address);
++        mAuthorizationAgentRequestData.put(address, new Integer(nativeData));
++
+         // Bluez sends the UUID of the local service being accessed, _not_ the
+         // remote service
+         if (mBluetoothService.isEnabled() &&
+                 (BluetoothUuid.isAudioSource(uuid) || BluetoothUuid.isAvrcpTarget(uuid)
+                         || BluetoothUuid.isAdvAudioDist(uuid)) &&
+                         !isOtherSinkInNonDisconnectingState(address)) {
+-            BluetoothDevice device = mAdapter.getRemoteDevice(address);
+             authorized = a2dp.getSinkPriority(device) > BluetoothA2dp.PRIORITY_OFF;
+             if (authorized) {
+-                Log.i(TAG, "Allowing incoming A2DP / AVRCP connection from " + address);
++                Log.i(TAG, "First check pass for incoming A2DP / AVRCP connection from " + address);
+                 // Some headsets try to connect AVCTP before AVDTP - against the recommendation
+                 // If AVCTP connection fails, we get stuck in IncomingA2DP state in the state
+                 // machine.  We don't handle AVCTP signals currently. We only send
+@@ -519,6 +527,8 @@ class BluetoothEventLoop {
+                 // some cases. For now, just don't move to incoming state in this case.
+                 if (!BluetoothUuid.isAvrcpTarget(uuid)) {
+                     mBluetoothService.notifyIncomingA2dpConnection(address);
++                } else {
++                    a2dp.allowIncomingConnect(device, authorized);
+                 }
+             } else {
+                 Log.i(TAG, "Rejecting incoming A2DP / AVRCP connection from " + address);
+@@ -527,7 +537,7 @@ class BluetoothEventLoop {
+             Log.i(TAG, "Rejecting incoming " + deviceUuid + " connection from " + address);
+         }
+         log("onAgentAuthorize(" + objectPath + ", " + deviceUuid + ") = " + authorized);
+-        return authorized;
++        if (!authorized) a2dp.allowIncomingConnect(device, authorized);
+     }
+
+     private boolean onAgentOutOfBandDataAvailable(String objectPath) {
+diff --git a/core/java/android/server/BluetoothService.java b/core/java/android/server/BluetoothService.java
+index 4d4d309..064c86c 100644
+--- a/core/java/android/server/BluetoothService.java
++++ b/core/java/android/server/BluetoothService.java
+@@ -27,8 +27,8 @@ package android.server;
+ import android.bluetooth.BluetoothAdapter;
+ import android.bluetooth.BluetoothClass;
+ import android.bluetooth.BluetoothDevice;
+-import android.bluetooth.BluetoothHeadset;
+ import android.bluetooth.BluetoothDeviceProfileState;
++import android.bluetooth.BluetoothHeadset;
+ import android.bluetooth.BluetoothProfileState;
+ import android.bluetooth.BluetoothSocket;
+ import android.bluetooth.BluetoothUuid;
+@@ -67,6 +67,7 @@ import java.io.FileWriter;
+ import java.io.IOException;
+ import java.io.InputStreamReader;
+ import java.io.PrintWriter;
++import java.io.RandomAccessFile;
+ import java.io.UnsupportedEncodingException;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -143,6 +144,11 @@ public class BluetoothService extends IBluetooth.Stub {
+     private static String mDockAddress;
+     private String mDockPin;
+
++    private static final String INCOMING_CONNECTION_FILE =
++      "/data/misc/bluetooth/incoming_connection.conf";
++    private HashMap<String, Pair<Integer, String>> mIncomingConnections;
++
++
+     private static class RemoteService {
+         public String address;
+         public ParcelUuid uuid;
+@@ -210,6 +216,7 @@ public class BluetoothService extends IBluetooth.Stub {
+
+         filter.addAction(Intent.ACTION_DOCK_EVENT);
+         mContext.registerReceiver(mReceiver, filter);
++        mIncomingConnections = new HashMap<String, Pair<Integer, String>>();
+     }
+
+     public static synchronized String readDockBluetoothAddress() {
+@@ -743,8 +750,6 @@ public class BluetoothService extends IBluetooth.Stub {
+
+             if (state == BluetoothDevice.BOND_BONDED) {
+                 addProfileState(address);
+-            } else if (state == BluetoothDevice.BOND_NONE) {
+-                removeProfileState(address);
+             }
+
+             if (DBG) log(address + " bond state " + oldState + " -> " + state + " (" +
+@@ -1326,6 +1331,8 @@ public class BluetoothService extends IBluetooth.Stub {
+     }
+
+     public synchronized boolean removeBondInternal(String address) {
++        // Unset the trusted device state and then unpair
++        setTrust(address, false);
+         return removeDeviceNative(getObjectPathFromAddress(address));
+     }
+
+@@ -2175,10 +2182,6 @@ public class BluetoothService extends IBluetooth.Stub {
+         return state;
+     }
+
+-    private void removeProfileState(String address) {
+-        mDeviceProfileState.remove(address);
+-    }
+-
+     private void initProfileState() {
+         String []bonds = null;
+         String val = getPropertyInternal("Devices");
+@@ -2227,6 +2230,11 @@ public class BluetoothService extends IBluetooth.Stub {
+         mA2dpService = a2dpService;
+     }
+
++    /*package*/ Integer getAuthorizationAgentRequestData(String address) {
++        Integer data = mEventLoop.getAuthorizationAgentRequestData().remove(address);
++        return data;
++    }
++
+     public void sendProfileStateMessage(int profile, int cmd) {
+         Message msg = new Message();
+         msg.what = cmd;
+@@ -2237,6 +2245,116 @@ public class BluetoothService extends IBluetooth.Stub {
+         }
+     }
+
++    private void createIncomingConnectionStateFile() {
++        File f = new File(INCOMING_CONNECTION_FILE);
++        if (!f.exists()) {
++            try {
++                f.createNewFile();
++            } catch (IOException e) {
++                Log.e(TAG, "IOException: cannot create file");
++            }
++        }
++    }
++
++    /** @hide */
++    public Pair<Integer, String> getIncomingState(String address) {
++        if (mIncomingConnections.isEmpty()) {
++            createIncomingConnectionStateFile();
++            readIncomingConnectionState();
++        }
++        return mIncomingConnections.get(address);
++    }
++
++    private void readIncomingConnectionState() {
++        synchronized(mIncomingConnections) {
++            FileInputStream fstream = null;
++            try {
++              fstream = new FileInputStream(INCOMING_CONNECTION_FILE);
++              DataInputStream in = new DataInputStream(fstream);
++              BufferedReader file = new BufferedReader(new InputStreamReader(in));
++              String line;
++              while((line = file.readLine()) != null) {
++                  line = line.trim();
++                  if (line.length() == 0) continue;
++                  String[] value = line.split(",");
++                  if (value != null && value.length == 3) {
++                      Integer val1 = Integer.parseInt(value[1]);
++                      Pair<Integer, String> val = new Pair(val1, value[2]);
++                      mIncomingConnections.put(value[0], val);
++                  }
++              }
++            } catch (FileNotFoundException e) {
++                log("FileNotFoundException: readIncomingConnectionState" + e.toString());
++            } catch (IOException e) {
++                log("IOException: readIncomingConnectionState" + e.toString());
++            } finally {
++                if (fstream != null) {
++                    try {
++                        fstream.close();
++                    } catch (IOException e) {
++                        // Ignore
++                    }
++                }
++            }
++        }
++    }
++
++    private void truncateIncomingConnectionFile() {
++        RandomAccessFile r = null;
++        try {
++            r = new RandomAccessFile(INCOMING_CONNECTION_FILE, "rw");
++            r.setLength(0);
++        } catch (FileNotFoundException e) {
++            log("FileNotFoundException: truncateIncomingConnectionState" + e.toString());
++        } catch (IOException e) {
++            log("IOException: truncateIncomingConnectionState" + e.toString());
++        } finally {
++            if (r != null) {
++                try {
++                    r.close();
++                } catch (IOException e) {
++                    // ignore
++                 }
++            }
++        }
++    }
++
++    /** @hide */
++    public void writeIncomingConnectionState(String address, Pair<Integer, String> data) {
++        synchronized(mIncomingConnections) {
++            mIncomingConnections.put(address, data);
++
++            truncateIncomingConnectionFile();
++            BufferedWriter out = null;
++            StringBuilder value = new StringBuilder();
++            try {
++                out = new BufferedWriter(new FileWriter(INCOMING_CONNECTION_FILE, true));
++                for (String devAddress: mIncomingConnections.keySet()) {
++                  Pair<Integer, String> val = mIncomingConnections.get(devAddress);
++                  value.append(devAddress);
++                  value.append(",");
++                  value.append(val.first.toString());
++                  value.append(",");
++                  value.append(val.second);
++                  value.append("\n");
++                }
++                out.write(value.toString());
++            } catch (FileNotFoundException e) {
++                log("FileNotFoundException: writeIncomingConnectionState" + e.toString());
++            } catch (IOException e) {
++                log("IOException: writeIncomingConnectionState" + e.toString());
++            } finally {
++                if (out != null) {
++                    try {
++                        out.close();
++                    } catch (IOException e) {
++                        // Ignore
++                    }
++                }
++            }
++        }
++    }
++
+     private static void log(String msg) {
+         Log.d(TAG, msg);
+     }
+@@ -2287,4 +2405,5 @@ public class BluetoothService extends IBluetooth.Stub {
+             short channel);
+     private native boolean removeServiceRecordNative(int handle);
+     private native boolean setLinkTimeoutNative(String path, int num_slots);
++    native boolean setAuthorizationNative(String address, boolean value, int data);
+ }
+diff --git a/core/jni/android_server_BluetoothEventLoop.cpp b/core/jni/android_server_BluetoothEventLoop.cpp
+index d8e049d..6c0a18e 100644
+--- a/core/jni/android_server_BluetoothEventLoop.cpp
++++ b/core/jni/android_server_BluetoothEventLoop.cpp
+@@ -106,7 +106,7 @@ static void classInitNative(JNIEnv* env, jclass clazz) {
+                                                          "(Ljava/lang/String;Z)V");
+
+     method_onAgentAuthorize = env->GetMethodID(clazz, "onAgentAuthorize",
+-                                               "(Ljava/lang/String;Ljava/lang/String;)Z");
++                                               "(Ljava/lang/String;Ljava/lang/String;I)V");
+     method_onAgentOutOfBandDataAvailable = env->GetMethodID(clazz, "onAgentOutOfBandDataAvailable",
+                                                "(Ljava/lang/String;)Z");
+     method_onAgentCancel = env->GetMethodID(clazz, "onAgentCancel", "()V");
+@@ -917,29 +917,11 @@ DBusHandlerResult agent_event_filter(DBusConnection *conn,
+         LOGV("... object_path = %s", object_path);
+         LOGV("... uuid = %s", uuid);
+
+-        bool auth_granted =
+-            env->CallBooleanMethod(nat->me, method_onAgentAuthorize,
+-                env->NewStringUTF(object_path), env->NewStringUTF(uuid));
++        dbus_message_ref(msg);  // increment refcount because we pass to java
++        env->CallBooleanMethod(nat->me, method_onAgentAuthorize,
++                env->NewStringUTF(object_path), env->NewStringUTF(uuid),
++                int(msg));
+
+-        // reply
+-        if (auth_granted) {
+-            DBusMessage *reply = dbus_message_new_method_return(msg);
+-            if (!reply) {
+-                LOGE("%s: Cannot create message reply\n", __FUNCTION__);
+-                goto failure;
+-            }
+-            dbus_connection_send(nat->conn, reply, NULL);
+-            dbus_message_unref(reply);
+-        } else {
+-            DBusMessage *reply = dbus_message_new_error(msg,
+-                    "org.bluez.Error.Rejected", "Authorization rejected");
+-            if (!reply) {
+-                LOGE("%s: Cannot create message reply\n", __FUNCTION__);
+-                goto failure;
+-            }
+-            dbus_connection_send(nat->conn, reply, NULL);
+-            dbus_message_unref(reply);
+-        }
+         goto success;
+     } else if (dbus_message_is_method_call(msg,
+             "org.bluez.Agent", "OutOfBandAvailable")) {
+diff --git a/core/jni/android_server_BluetoothService.cpp b/core/jni/android_server_BluetoothService.cpp
+index daa59a6..be2e5f3 100644
+--- a/core/jni/android_server_BluetoothService.cpp
++++ b/core/jni/android_server_BluetoothService.cpp
+@@ -599,6 +599,35 @@ static jboolean setRemoteOutOfBandDataNative(JNIEnv *env, jobject object, jstrin
+     return JNI_FALSE;
+ }
+
++static jboolean setAuthorizationNative(JNIEnv *env, jobject object, jstring address,
++                         jboolean val, int nativeData) {
++#ifdef HAVE_BLUETOOTH
++    LOGV(__FUNCTION__);
++    native_data_t *nat = get_native_data(env, object);
++    if (nat) {
++        DBusMessage *msg = (DBusMessage *)nativeData;
++        DBusMessage *reply;
++        if (val) {
++            reply = dbus_message_new_method_return(msg);
++        } else {
++            reply = dbus_message_new_error(msg,
++                    "org.bluez.Error.Rejected", "Authorization rejected");
++        }
++        if (!reply) {
++            LOGE("%s: Cannot create message reply D-Bus\n", __FUNCTION__);
++            dbus_message_unref(msg);
++            return JNI_FALSE;
++        }
++
++        dbus_connection_send(nat->conn, reply, NULL);
++        dbus_message_unref(msg);
++        dbus_message_unref(reply);
++        return JNI_TRUE;
++    }
++#endif
++    return JNI_FALSE;
++}
++
+ static jboolean setPinNative(JNIEnv *env, jobject object, jstring address,
+                          jstring pin, int nativeData) {
+ #ifdef HAVE_BLUETOOTH
+@@ -1029,6 +1058,7 @@ static JNINativeMethod sMethods[] = {
+             (void *)setPairingConfirmationNative},
+     {"setPasskeyNative", "(Ljava/lang/String;II)Z", (void *)setPasskeyNative},
+     {"setRemoteOutOfBandDataNative", "(Ljava/lang/String;[B[BI)Z", (void *)setRemoteOutOfBandDataNative},
++    {"setAuthorizationNative", "(Ljava/lang/String;ZI)Z", (void *)setAuthorizationNative},
+     {"setPinNative", "(Ljava/lang/String;Ljava/lang/String;I)Z", (void *)setPinNative},
+     {"cancelPairingUserInputNative", "(Ljava/lang/String;I)Z",
+             (void *)cancelPairingUserInputNative},
+--
+1.7.3.1

@@ -1,0 +1,14 @@
+core/java/android/net/http/Connection.java
+@@ -222,6 +222,12 @@ void processRequests(Request firstRequest) {
+                         }
+                     }
+
++                    /* we have a connection, let the event handler
++                     * know of any associated certificate,
++                     * potentially none.
++                     */
++                    req.mEventHandler.certificate(mCertificate);
++
+                     try {
+                         /* FIXME: don't increment failure count if old
+                            connection?  There should not be a penalty for

@@ -1,0 +1,55 @@
+--- a/content/base/src/nsFrameMessageManager.cpp
++++ a/content/base/src/nsFrameMessageManager.cpp
+@@ -257,7 +257,7 @@ NS_IMETHODIMP
+ nsFrameMessageManager::Dump(const nsAString& aStr)
+ {
+ #ifdef ANDROID
+-  __android_log_print(ANDROID_LOG_INFO, "Gecko", NS_ConvertUTF16toUTF8(aStr).get());
++  __android_log_print(ANDROID_LOG_INFO, "Gecko", "%s", NS_ConvertUTF16toUTF8(aStr).get());
+ #endif
+   fputs(NS_ConvertUTF16toUTF8(aStr).get(), stdout);
+   fflush(stdout);
+--- a/dom/workers/WorkerPrivate.cpp
++++ a/dom/workers/WorkerPrivate.cpp
+@@ -1233,7 +1233,7 @@ public:
+     if (!logged) {
+       NS_ConvertUTF16toUTF8 msg(aMessage);
+ #ifdef ANDROID
+-      __android_log_print(ANDROID_LOG_INFO, "Gecko", msg.get());
++      __android_log_print(ANDROID_LOG_INFO, "Gecko", "%s", msg.get());
+ #endif
+       fputs(msg.get(), stderr);
+       fflush(stderr);
+--- a/dom/workers/WorkerScope.cpp
++++ a/dom/workers/WorkerScope.cpp
+@@ -542,7 +542,7 @@ private:
+       }
+
+ #ifdef ANDROID
+-      __android_log_print(ANDROID_LOG_INFO, "Gecko", buffer.ptr());
++      __android_log_print(ANDROID_LOG_INFO, "Gecko", "%s", buffer.ptr());
+ #endif
+       fputs(buffer.ptr(), stdout);
+       fflush(stdout);
+--- a/js/xpconnect/loader/mozJSComponentLoader.cpp
++++ a/js/xpconnect/loader/mozJSComponentLoader.cpp
+@@ -176,7 +176,7 @@ Dump(JSContext *cx, unsigned argc, jsval *vp)
+
+     NS_ConvertUTF16toUTF8 utf8str(reinterpret_cast<const PRUnichar*>(chars));
+ #ifdef ANDROID
+-    __android_log_print(ANDROID_LOG_INFO, "Gecko", utf8str.get());
++    __android_log_print(ANDROID_LOG_INFO, "Gecko", "%s", utf8str.get());
+ #endif
+     fputs(utf8str.get(), stdout);
+     fflush(stdout);
+--- a/js/xpconnect/shell/xpcshell.cpp
++++ a/js/xpconnect/shell/xpcshell.cpp
+@@ -423,7 +423,7 @@ Dump(JSContext *cx, unsigned argc, jsval *vp)
+         return false;
+
+ #ifdef ANDROID
+-    __android_log_print(ANDROID_LOG_INFO, "Gecko", bytes.ptr());
++    __android_log_print(ANDROID_LOG_INFO, "Gecko", "%s", bytes.ptr());
+ #endif
+     fputs(bytes.ptr(), gOutFile);
+     fflush(gOutFile);

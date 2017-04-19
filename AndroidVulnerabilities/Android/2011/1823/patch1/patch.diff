@@ -1,0 +1,25 @@
+diff --git a/NetlinkManager.cpp b/NetlinkManager.cpp
+index 36db0ff..29cd88e 100644
+--- a/NetlinkManager.cpp
++++ b/NetlinkManager.cpp
+@@ -50,6 +50,7 @@
+ int NetlinkManager::start() {
+     struct sockaddr_nl nladdr;
+     int sz = 64 * 1024;
++    int on = 1;
+
+     memset(&nladdr, 0, sizeof(nladdr));
+     nladdr.nl_family = AF_NETLINK;
+@@ -63,7 +64,12 @@
+     }
+
+     if (setsockopt(mSock, SOL_SOCKET, SO_RCVBUFFORCE, &sz, sizeof(sz)) < 0) {
+-        SLOGE("Unable to set uevent socket options: %s", strerror(errno));
++        SLOGE("Unable to set uevent socket SO_RECBUFFORCE option: %s", strerror(errno));
++        return -1;
++    }
++
++    if (setsockopt(mSock, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) < 0) {
++        SLOGE("Unable to set uevent socket SO_PASSCRED option: %s", strerror(errno));
+         return -1;
+     }

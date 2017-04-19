@@ -1,0 +1,15 @@
+Index: trunk/JavaScriptCore/API/JSValueRef.cpp
+===================================================================
+--- trunk/JavaScriptCore/API/JSValueRef.cpp	(revision 59941)
++++ trunk/JavaScriptCore/API/JSValueRef.cpp	(revision 64706)
+@@ -214,4 +214,10 @@
+     APIEntryShim entryShim(exec);
+ 
++    // Our JSValue representation relies on a standard bit pattern for NaN. NaNs
++    // generated internally to JavaScriptCore naturally have that representation,
++    // but an external NaN might not.
++    if (isnan(value))
++        value = NaN;
++
+     return toRef(exec, jsNumber(exec, value));
+ }

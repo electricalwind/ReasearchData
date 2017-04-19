@@ -1,0 +1,368 @@
+Show user dialog for incoming BT connection
+requests from unknown devices.
+
+Change-Id: I7e9e8bbbd8808a7569f84d213fa3d716f7f5bc80
+---
+ AndroidManifest.xml                                |   19 +++
+ res/layout/bluetooth_connection_access.xml         |   40 +++++
+ .../bluetooth/BluetoothPermissionActivity.java     |  166 ++++++++++++++++++++
+ .../bluetooth/BluetoothPermissionRequest.java      |   99 ++++++++++++
+ 4 files changed, 324 insertions(+), 0 deletions(-)
+ create mode 100644 res/layout/bluetooth_connection_access.xml
+ create mode 100644 src/com/android/settings/bluetooth/BluetoothPermissionActivity.java
+ create mode 100644 src/com/android/settings/bluetooth/BluetoothPermissionRequest.java
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 5b59ad5..4a1bfc3 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -695,6 +695,25 @@
+             </intent-filter>
+         </receiver>
+
++        <receiver android:name=".bluetooth.BluetoothPermissionRequest">
++            <intent-filter>
++                <action android:name="android.bluetooth.device.action.CONNECTION_ACCESS_REQUEST" />
++                <action android:name="android.bluetooth.device.action.CONNECTION_ACCESS_CANCEL" />
++            </intent-filter>
++        </receiver>
++
++        <activity android:name=".bluetooth.BluetoothPermissionActivity"
++                  android:label="@string/bluetooth_connection_permission_request"
++                  android:excludeFromRecents="true"
++                  android:permission="android.permission.BLUETOOTH_ADMIN"
++                  android:theme="@*android:style/Theme.Dialog.Alert">
++            <intent-filter>
++                <action android:name="android.bluetooth.device.action.CONNECTION_ACCESS_REQUEST" />
++                <action android:name="android.bluetooth.device.action.CONNECTION_ACCESS_CANCEL" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </activity>
++
+         <activity android:name="ActivityPicker"
+                 android:label="@string/activity_picker_label"
+                 android:theme="@*android:style/Theme.Dialog.Alert"
+diff --git a/res/layout/bluetooth_connection_access.xml b/res/layout/bluetooth_connection_access.xml
+new file mode 100644
+index 0000000..1e74162
+--- /dev/null
++++ b/res/layout/bluetooth_connection_access.xml
+@@ -0,0 +1,40 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++/*
++** Copyright 2011, The Android Open Source Project
++**
++** Licensed under the Apache License, Version 2.0 (the "License");
++** you may not use this file except in compliance with the License.
++** You may obtain a copy of the License at
++**
++**     http://www.apache.org/licenses/LICENSE-2.0
++**
++** Unless required by applicable law or agreed to in writing, software
++** distributed under the License is distributed on an "AS IS" BASIS,
++** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++** See the License for the specific language governing permissions and
++** limitations under the License.
++*/
++-->
++
++<ScrollView
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_height="match_parent"
++    android:layout_width="match_parent">
++
++    <LinearLayout
++        android:layout_height="match_parent"
++        android:layout_width="match_parent"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@+id/message"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginLeft="20dip"
++            android:layout_marginRight="20dip"
++            android:gravity="center_horizontal"
++            android:textAppearance="?android:attr/textAppearanceMedium" />
++    </LinearLayout>
++
++</ScrollView>
+diff --git a/src/com/android/settings/bluetooth/BluetoothPermissionActivity.java b/src/com/android/settings/bluetooth/BluetoothPermissionActivity.java
+new file mode 100644
+index 0000000..9699731
+--- /dev/null
++++ b/src/com/android/settings/bluetooth/BluetoothPermissionActivity.java
+@@ -0,0 +1,166 @@
++/*
++ * Copyright (C) 2011 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.bluetooth;
++
++import android.bluetooth.BluetoothDevice;
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.DialogInterface;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.os.Bundle;
++import android.preference.Preference;
++import android.util.Log;
++import android.view.View;
++import android.widget.CheckBox;
++import android.widget.CompoundButton;
++import android.widget.EditText;
++import android.widget.TextView;
++import android.widget.Button;
++import android.widget.CompoundButton.OnCheckedChangeListener;
++
++import com.android.internal.app.AlertActivity;
++import com.android.internal.app.AlertController;
++
++import com.android.settings.R;
++
++/**
++ * BluetoothPermissionActivity shows a dialog for accepting incoming
++ * profile connection request from untrusted devices.
++ */
++public class BluetoothPermissionActivity extends AlertActivity implements
++        DialogInterface.OnClickListener, Preference.OnPreferenceChangeListener {
++    private static final String TAG = "BluetoothPermissionActivity";
++    private static final boolean DEBUG = false;
++
++    private static final String KEY_USER_TIMEOUT = "user_timeout";
++
++    private View mView;
++    private TextView messageView;
++    private Button mOkButton;
++    private BluetoothDevice mDevice;
++
++    private BroadcastReceiver mReceiver = new BroadcastReceiver() {
++        @Override
++        public void onReceive(Context context, Intent intent) {
++            String action = intent.getAction();
++            if (action.equals(BluetoothDevice.ACTION_CONNECTION_ACCESS_CANCEL)) {
++                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
++                if (mDevice.equals(device)) dismissDialog();
++            }
++        }
++    };
++
++    private void dismissDialog() {
++        this.dismiss();
++    }
++
++    @Override
++    protected void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++
++        if (DEBUG) Log.d(TAG, "onCreate");
++        Intent i = getIntent();
++        String action = i.getAction();
++        if (action.equals(BluetoothDevice.ACTION_CONNECTION_ACCESS_REQUEST)) {
++            mDevice = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
++            showConnectionDialog();
++            registerReceiver(mReceiver,
++                             new IntentFilter(BluetoothDevice.ACTION_CONNECTION_ACCESS_CANCEL));
++        } else {
++            Log.e(TAG, "Error: this activity may be started only with intent "
++                    + "ACTION_CONNECTION_ACCESS_REQUEST");
++            finish();
++        }
++    }
++
++    private void showConnectionDialog() {
++        final AlertController.AlertParams p = mAlertParams;
++        p.mIconId = android.R.drawable.ic_dialog_info;
++        p.mTitle = getString(R.string.bluetooth_connection_permission_request);
++        p.mView = createView();
++        p.mPositiveButtonText = getString(R.string.yes);
++        p.mPositiveButtonListener = this;
++        p.mNegativeButtonText = getString(R.string.no);
++        p.mNegativeButtonListener = this;
++        mOkButton = mAlert.getButton(DialogInterface.BUTTON_POSITIVE);
++        setupAlert();
++    }
++
++    private String createDisplayText() {
++        String mRemoteName = mDevice != null ? mDevice.getName() : null;
++        if (mRemoteName == null) mRemoteName = getString(R.string.unknown);
++        String mMessage1 = getString(R.string.bluetooth_connection_dialog_text,
++                mRemoteName);
++        return mMessage1;
++    }
++
++    private View createView() {
++        mView = getLayoutInflater().inflate(R.layout.bluetooth_connection_access, null);
++        messageView = (TextView)mView.findViewById(R.id.message);
++        messageView.setText(createDisplayText());
++        return mView;
++    }
++
++    private void onPositive() {
++        sendIntentToReceiver(BluetoothDevice.ACTION_CONNECTION_ACCESS_REPLY,
++                             BluetoothDevice.EXTRA_CONNECTION_ACCESS_RESULT,
++                             BluetoothDevice.CONNECTION_ACCESS_YES);
++        finish();
++    }
++
++    private void onNegative() {
++        sendIntentToReceiver(BluetoothDevice.ACTION_CONNECTION_ACCESS_REPLY,
++                             BluetoothDevice.EXTRA_CONNECTION_ACCESS_RESULT,
++                             BluetoothDevice.CONNECTION_ACCESS_NO);
++        finish();
++    }
++
++    private void sendIntentToReceiver(final String intentName, final String extraName,
++            final int extraValue) {
++        Intent intent = new Intent(intentName);
++        if (extraName != null) {
++            intent.putExtra(extraName, extraValue);
++        }
++        intent.putExtra(BluetoothDevice.EXTRA_DEVICE, mDevice);
++        sendBroadcast(intent, android.Manifest.permission.BLUETOOTH_ADMIN);
++    }
++
++    public void onClick(DialogInterface dialog, int which) {
++        switch (which) {
++            case DialogInterface.BUTTON_POSITIVE:
++                onPositive();
++                break;
++
++            case DialogInterface.BUTTON_NEGATIVE:
++                onNegative();
++                break;
++            default:
++                break;
++        }
++    }
++
++    @Override
++    protected void onDestroy() {
++        super.onDestroy();
++        unregisterReceiver(mReceiver);
++    }
++
++    public boolean onPreferenceChange(Preference preference, Object newValue) {
++        return true;
++    }
++}
+diff --git a/src/com/android/settings/bluetooth/BluetoothPermissionRequest.java b/src/com/android/settings/bluetooth/BluetoothPermissionRequest.java
+new file mode 100644
+index 0000000..797eff7
+--- /dev/null
++++ b/src/com/android/settings/bluetooth/BluetoothPermissionRequest.java
+@@ -0,0 +1,99 @@
++/*
++ * Copyright (C) 2011 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.bluetooth;
++
++import android.app.Notification;
++import android.app.NotificationManager;
++import android.app.PendingIntent;
++import android.bluetooth.BluetoothDevice;
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.os.PowerManager;
++import android.util.Log;
++
++import com.android.settings.R;
++
++/**
++ * BluetoothPermissionRequest is a receiver to receive Bluetooth connection
++ * access request.
++ */
++public final class BluetoothPermissionRequest extends BroadcastReceiver {
++
++    private static final String TAG = "BluetoothPermissionRequest";
++    private static final boolean DEBUG = false;
++
++    public static final int NOTIFICATION_ID = android.R.drawable.stat_sys_data_bluetooth;
++
++    @Override
++    public void onReceive(Context context, Intent intent) {
++        String action = intent.getAction();
++
++        if (DEBUG) Log.d(TAG, "onReceive");
++
++        if (action.equals(BluetoothDevice.ACTION_CONNECTION_ACCESS_REQUEST)) {
++            LocalBluetoothManager localManager = LocalBluetoothManager.getInstance(context);
++            // convert broadcast intent into activity intent (same action string)
++            BluetoothDevice device =
++                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
++
++            Intent connectionAccessIntent = new Intent(action);
++            connectionAccessIntent.setClass(context, BluetoothPermissionActivity.class);
++            connectionAccessIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++            connectionAccessIntent.putExtra(BluetoothDevice.EXTRA_DEVICE, device);
++
++            String deviceAddress = device != null ? device.getAddress() : null;
++
++            PowerManager powerManager =
++                (PowerManager) context.getSystemService(Context.POWER_SERVICE);
++
++            if (powerManager.isScreenOn() &&
++                localManager.shouldShowDialogInForeground(deviceAddress) ) {
++                context.startActivity(connectionAccessIntent);
++            } else {
++                // Put up a notification that leads to the dialog
++
++                // Create an intent triggered by clicking on the
++                // "Clear All Notifications" button
++
++                Intent deleteIntent = new Intent(BluetoothDevice.ACTION_CONNECTION_ACCESS_REPLY);
++                deleteIntent.putExtra(BluetoothDevice.EXTRA_CONNECTION_ACCESS_RESULT,
++                        BluetoothDevice.CONNECTION_ACCESS_NO);
++
++                Notification notification = new Notification(android.R.drawable.stat_sys_data_bluetooth,
++                    context.getString(R.string.bluetooth_connection_permission_request), System.currentTimeMillis());
++                String deviceName = device != null ? device.getName() : null;
++                notification.setLatestEventInfo(context,
++                    context.getString(R.string.bluetooth_connection_permission_request),
++                    context.getString(R.string.bluetooth_connection_notif_message, deviceName),
++                    PendingIntent.getActivity(context, 0, connectionAccessIntent, 0));
++                notification.flags = Notification.FLAG_AUTO_CANCEL | Notification.FLAG_ONLY_ALERT_ONCE;
++                notification.defaults = Notification.DEFAULT_SOUND;
++                notification.deleteIntent = PendingIntent.getBroadcast(context, 0, deleteIntent, 0);
++
++                NotificationManager notificationManager =
++                    (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
++                notificationManager.notify(NOTIFICATION_ID, notification);
++            }
++        } else if (action.equals(BluetoothDevice.ACTION_CONNECTION_ACCESS_CANCEL)) {
++            // Remove the notification
++            NotificationManager manager = (NotificationManager) context
++                .getSystemService(Context.NOTIFICATION_SERVICE);
++            manager.cancel(NOTIFICATION_ID);
++        }
++   }
++}
+--

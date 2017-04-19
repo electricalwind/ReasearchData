@@ -1,0 +1,10 @@
+src/com/android/mms/ui/ComposeMessageActivity.java
+@@ -1867,7 +1867,7 @@ protected void onRestart() {
+        // to the ConversationList where the user can enter this in a clean manner.
+        if (mWorkingMessage.isWorthSaving()) {
+        mWorkingMessage.unDiscard();    // it was discarded in onStop().
+        -            } else {
+        +            } else if (isRecipientsEditorVisible()) {
+        goToConversationList();
+        }
+        }

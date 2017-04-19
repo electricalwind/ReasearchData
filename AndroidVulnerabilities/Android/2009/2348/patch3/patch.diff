@@ -1,0 +1,41 @@
+camera/libcameraservice/CameraService.cpp
+@@ -1046,7 +1046,6 @@ status_t CameraService::dump(int fd, const Vector<String16>& args)
+ }
+
+
+-#if DEBUG_HEAP_LEAKS
+
+ #define CHECK_INTERFACE(interface, data, reply) \
+         do { if (!data.enforceInterface(interface::getInterfaceDescriptor())) { \
+ @@ -1079,6 +1078,7 @@ status_t CameraService::onTransact(
+
+     status_t err = BnCameraService::onTransact(code, data, reply, flags);
+
++#if DEBUG_HEAP_LEAKS
+     LOGD("+++ onTransact err %d code %d", err, code);
+
+     if (err == UNKNOWN_TRANSACTION || err == PERMISSION_DENIED) {
+ @@ -1114,9 +1114,10 @@ status_t CameraService::onTransact(
+             break;
+         }
+     }
++#endif // DEBUG_HEAP_LEAKS
++
+     return err;
+ }
+
+-#endif // DEBUG_HEAP_LEAKS
+
+ }; // namespace android
+
+ camera/libcameraservice/CameraService.h
+ @@ -58,10 +58,8 @@ class CameraService : public BnCameraService
+
+              void            removeClient(const sp<ICameraClient>& cameraClient);
+
+ -#if DEBUG_HEAP_LEAKS
+      virtual status_t onTransact(
+          uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags);
+ -#endif
+
+  private:

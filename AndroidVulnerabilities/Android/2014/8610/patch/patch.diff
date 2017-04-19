@@ -1,0 +1,14 @@
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 13a84d8..ea7429b 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -235,7 +235,8 @@
+         </receiver>
+
+         <!-- Catch-all receiver for broadcasts that don't have associated security -->
+-        <receiver android:name=".transaction.SmsReceiver">
++        <receiver android:name=".transaction.SmsReceiver"
++             android:permission="android.permission.SEND_SMS">
+             <intent-filter>
+                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+             </intent-filter>
