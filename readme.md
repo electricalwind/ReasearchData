@@ -6,4 +6,4 @@ Here you can access data related to my research
 
 ### An Empirical Analysis of Vulnerabilities in OpenSSL and the Linux Kernel 
 
-* [Additional Figures](VulnerabilityAnalysis/vuln.md)
+* [Additional Figures](VulnerabilityAnalysis/)
